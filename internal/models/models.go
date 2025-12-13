@@ -160,9 +160,9 @@ type WorkflowStep struct {
 	Env        map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
 	Inputs     map[string]string `json:"inputs,omitempty" yaml:"inputs,omitempty"`
 	Outputs    map[string]string `json:"outputs,omitempty" yaml:"outputs,omitempty"`
-	Timeout    int               `json:"timeout,omitempty" yaml:"timeout,omitempty"` // in seconds
+	Timeout    time.Duration     `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	Retries    int               `json:"retries,omitempty" yaml:"retries,omitempty"`
-	RetryDelay time.Duration     `json:"retry_delay,omitempty" yaml:"retry_delay,omitempty"` // in seconds
+	RetryDelay time.Duration     `json:"retry_delay,omitempty" yaml:"retry_delay,omitempty"`
 }
 
 type ExecAction struct {

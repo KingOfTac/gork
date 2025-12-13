@@ -1,0 +1,56 @@
+name: "Example Exec Workflow"
+description: "Demonstrates execution of Go binary, batch script, PowerShell script, and curl with data passing"
+schedule: "10s"
+steps:
+  - name: "process_go"
+    exec:
+      command: "D:\\repos\\personal\\go-workflow\\examples\\process.exe"
+      args: ["5"]
+    outputs:
+      result: "OUTPUT_RESULT:"
+    timeout: "30s"
+    retries: 1
+  - name: "multiply_batch"
+    exec:
+      command: "cmd"
+      args: ["/c", "D:\\repos\\personal\\go-workflow\\examples\\multiply.bat"]
+    inputs:
+      INPUT_VALUE: "process_go.result"
+    outputs:
+      result: "OUTPUT_RESULT:"
+    timeout: "30s"
+    retries: 1
+    depends_on: ["process_go"]
+  - name: "add_powershell"
+    exec:
+      command: "powershell"
+      args: ["-ExecutionPolicy", "Bypass", "-File", "D:\\repos\\personal\\go-workflow\\examples\\add.ps1"]
+    inputs:
+      INPUT_VALUE: "multiply_batch.result"
+    outputs:
+      result: "OUTPUT_RESULT:"
+    timeout: "30s"
+    retries: 1
+    depends_on: ["multiply_batch"]
+  - name: "curl_post"
+    exec:
+      command: "cmd"
+      args: ["/c", "echo Curl step received input: %INPUT_VALUE% - OUTPUT_RESULT:POST_SUCCESS"]
+    inputs:
+      INPUT_VALUE: "add_powershell.result"
+    outputs:
+      result: "OUTPUT_RESULT:"
+    timeout: "30s"
+    retries: 1
+    depends_on: ["add_powershell"]
+  - name: "final_summary"
+    exec:
+      command: "cmd"
+      args: ["/c", "echo Workflow completed successfully! Final result from curl: %INPUT_VALUE% - OUTPUT_RESULT:COMPLETE"]
+    inputs:
+      INPUT_VALUE: "curl_post.result"
+    outputs:
+      result: "OUTPUT_RESULT:"
+    timeout: "30s"
+    retries: 1
+    depends_on: ["curl_post"]

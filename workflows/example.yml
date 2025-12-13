@@ -1,0 +1,20 @@
+name: example
+description: Sample workflow
+steps:
+  - name: fetch
+    exec:
+      command: cmd
+      args: ["/c", "echo Fetching data"]
+    depends_on: []
+  - name: process
+    exec:
+      command: cmd
+      args: ["/c", "echo Processing data"]
+    depends_on:
+      - fetch
+  - name: store
+    exec:
+      command: cmd
+      args: ["/c", "echo Storing data"]
+    depends_on:
+      - process
