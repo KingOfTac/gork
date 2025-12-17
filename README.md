@@ -13,10 +13,4 @@
 
 ### Installation
 
-```bash
-# Chaos
-curl -fsSL https://github.com/kingoftac/gork/raw/main/install | bash
-
-# GO Tool
-go install github.com/kingoftac/gork/cmd/gork@latest
-```
+TODO
