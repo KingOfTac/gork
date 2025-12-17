@@ -9,6 +9,7 @@ import (
 
 	"github.com/apparentlymart/go-userdirs/userdirs"
 
+	"github.com/kingoftac/flagon/cli"
 	"github.com/kingoftac/gork/internal/db"
 	"github.com/kingoftac/gork/internal/engine"
 	"github.com/kingoftac/gork/internal/version"
@@ -19,59 +20,67 @@ var (
 	dirs   = userdirs.ForApp("gork", "com.github.kingoftac.gork", "com.github.kingoftac.gork")
 )
 
-func printUsage() {
-	fmt.Fprintf(os.Stderr, `
-Usage:
-  gork [global flags] <command> [command flags]
-
-Global Flags:
-  -v                   Enable verbose output
-  -version             Print version information and exit
-
-Commands:
-  db                   Database management
-	workflow             Workflow management
-
-Run:
-  gork <command> -h
-for more information on a command
-	`)
-}
-
 func main() {
-	global := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	verbose := global.Bool("v", false, "Enable verbose output")
-	showVersion := global.Bool("version", false, "Print version information and exit")
+	c := cli.New(&cli.Command{
+		Name:        "gork",
+		Description: "Workflow Orchestration Engine",
+		Flags: func(fs *flag.FlagSet) {
+			fs.Bool("version", false, "Print version information and exit")
+		},
+		Handler: func(ctx context.Context) error {
+			showVersion := flag.Lookup("version")
+			if showVersion != nil && showVersion.Value.String() == "true" {
+				fmt.Println(version.Version)
+				return nil
+			}
 
-	global.Usage = func() {
-		printUsage()
+			version.PrintBanner()
+			return nil
+		},
+	}, cli.WithLogger(log.New(os.Stdout, "[gork] ", log.LstdFlags)))
+
+	// c.Hook(cli.BeforeRun, func(ctx context.Context) error {
+	// 	c.App().Logger.Println("running...")
+	// 	return nil
+	// })
+
+	if err := c.Run(os.Args[1:]); err != nil {
+		log.Fatal(err)
 	}
 
-	if err := global.Parse(os.Args[1:]); err != nil {
-		os.Exit(1)
-	}
+	// global := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	// verbose := global.Bool("v", false, "Enable verbose output")
+	// showVersion := global.Bool("version", false, "Print version information and exit")
 
-	if *showVersion {
-		fmt.Println(version.Version)
-		os.Exit(0)
-	}
+	// global.Usage = func() {
+	// 	printUsage()
+	// }
 
-	args := global.Args()
-	if len(args) == 0 {
-		version.PrintBanner()
-		printUsage()
-		os.Exit(0)
-	}
+	// if err := global.Parse(os.Args[1:]); err != nil {
+	// 	os.Exit(1)
+	// }
 
-	switch args[0] {
-	case "db":
-		handleDB(args[1:], *verbose)
-	case "workflow":
-		handleWorkflow(args[1:], *verbose)
-	default:
-		printUsage()
-		os.Exit(1)
-	}
+	// if *showVersion {
+	// 	fmt.Println(version.Version)
+	// 	os.Exit(0)
+	// }
+
+	// args := global.Args()
+	// if len(args) == 0 {
+	// 	version.PrintBanner()
+	// 	printUsage()
+	// 	os.Exit(0)
+	// }
+
+	// switch args[0] {
+	// case "db":
+	// 	handleDB(args[1:], *verbose)
+	// case "workflow":
+	// 	handleWorkflow(args[1:], *verbose)
+	// default:
+	// 	printUsage()
+	// 	os.Exit(1)
+	// }
 }
 
 func handleDB(args []string, verbose bool) {
