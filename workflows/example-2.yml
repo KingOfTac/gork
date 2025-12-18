@@ -4,7 +4,7 @@ schedule: "10s"
 steps:
   - name: "process_go"
     exec:
-      command: "D:\\repos\\personal\\go-workflow\\examples\\process.exe"
+      command: "C:\\Users\\NathanBrown\\Documents\\repos\\gork\\workflows\\process.exe"
       args: ["5"]
     outputs:
       result: "OUTPUT_RESULT:"
@@ -13,7 +13,7 @@ steps:
   - name: "multiply_batch"
     exec:
       command: "cmd"
-      args: ["/c", "D:\\repos\\personal\\go-workflow\\examples\\multiply.bat"]
+      args: ["/c", "C:\\Users\\NathanBrown\\Documents\\repos\\gork\\workflows\\multiply.bat"]
     inputs:
       INPUT_VALUE: "process_go.result"
     outputs:
@@ -24,7 +24,7 @@ steps:
   - name: "add_powershell"
     exec:
       command: "powershell"
-      args: ["-ExecutionPolicy", "Bypass", "-File", "D:\\repos\\personal\\go-workflow\\examples\\add.ps1"]
+      args: ["-ExecutionPolicy", "Bypass", "-File", "C:\\Users\\NathanBrown\\Documents\\repos\\gork\\workflows\\add.ps1"]
     inputs:
       INPUT_VALUE: "multiply_batch.result"
     outputs:
