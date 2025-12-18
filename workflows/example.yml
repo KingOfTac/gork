@@ -1,5 +1,6 @@
 name: example
 description: Sample workflow
+schedule: "1s"
 steps:
   - name: fetch
     exec:

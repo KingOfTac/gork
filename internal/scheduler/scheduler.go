@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/kingoftac/gork/internal/db"
@@ -10,47 +11,205 @@ import (
 	"github.com/kingoftac/gork/internal/models"
 )
 
+type workflowSchedule struct {
+	workflow  *models.Workflow
+	timer     *time.Timer
+	duration  time.Duration
+	running   bool
+	cancelRun context.CancelFunc
+}
+
 type Scheduler struct {
-	db         *db.DB
-	eng        *engine.Engine
-	activeRuns map[int64]context.CancelFunc
+	db        *db.DB
+	eng       *engine.Engine
+	schedules map[int64]*workflowSchedule
+	mu        sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
 }
 
 func NewScheduler(db *db.DB) *Scheduler {
 	return &Scheduler{
-		db:         db,
-		eng:        engine.NewEngine(db),
-		activeRuns: make(map[int64]context.CancelFunc),
+		db:        db,
+		eng:       engine.NewEngine(db),
+		schedules: make(map[int64]*workflowSchedule),
 	}
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
 	slog.Info("Scheduler starting", "component", "scheduler")
 
-	// Recover incomplete runs
-	s.recoverRuns()
+	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	// Poll loop
+	s.recoverRuns()
+	s.loadWorkflows()
+
+	// Poll for workflow changes (new workflows, updated schedules, deleted workflows)
+	// This poll is just for config changes, not for triggering runs
+	// TODO: See if this can be event-driven instead of using polling
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	pollCount := 0
-	slog.Info("Scheduler poll loop started", "component", "scheduler", "interval", "30s")
+	slog.Info("Scheduler started", "component", "scheduler")
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-s.ctx.Done():
 			slog.Info("Scheduler received shutdown signal", "component", "scheduler")
 			s.shutdown()
 			slog.Info("Scheduler shutdown complete", "component", "scheduler")
 			return
 		case <-ticker.C:
-			pollCount++
-			slog.Debug("Scheduler poll cycle starting", "component", "scheduler", "cycle", pollCount)
-			s.pollAndRun()
-			slog.Debug("Scheduler poll cycle completed", "component", "scheduler", "cycle", pollCount)
+			s.loadWorkflows()
 		}
 	}
+}
+
+func (s *Scheduler) loadWorkflows() {
+	workflows, err := s.db.ListWorkflows()
+	if err != nil {
+		slog.Error("Failed to list workflows", "component", "scheduler", "error", err)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	seenIDs := make(map[int64]bool)
+
+	for _, w := range workflows {
+		seenIDs[w.ID] = true
+
+		if w.Schedule == "" {
+			if sched, exists := s.schedules[w.ID]; exists {
+				slog.Info("Removing schedule for workflow (no longer scheduled)", "component", "scheduler", "workflow", w.Name)
+				sched.timer.Stop()
+				delete(s.schedules, w.ID)
+			}
+			continue
+		}
+
+		duration, err := time.ParseDuration(w.Schedule)
+		if err != nil {
+			slog.Warn("Invalid schedule duration", "component", "scheduler", "workflow", w.Name, "schedule", w.Schedule, "error", err)
+			continue
+		}
+
+		if sched, exists := s.schedules[w.ID]; exists {
+			if sched.duration == duration {
+				sched.workflow = &w
+				continue
+			}
+			slog.Info("Updating workflow schedule", "component", "scheduler", "workflow", w.Name, "old_duration", sched.duration, "new_duration", duration)
+			sched.timer.Stop()
+		}
+
+		wCopy := w
+		s.scheduleWorkflow(&wCopy, duration)
+	}
+
+	for id, sched := range s.schedules {
+		if !seenIDs[id] {
+			slog.Info("Removing deleted workflow from scheduler", "component", "scheduler", "workflow", sched.workflow.Name)
+			sched.timer.Stop()
+			if sched.cancelRun != nil {
+				sched.cancelRun()
+			}
+			delete(s.schedules, id)
+		}
+	}
+}
+
+func (s *Scheduler) scheduleWorkflow(w *models.Workflow, duration time.Duration) {
+	initialDelay := s.calculateInitialDelay(w, duration)
+
+	slog.Info("Scheduling workflow", "component", "scheduler", "workflow", w.Name, "interval", duration, "initial_delay", initialDelay)
+
+	sched := &workflowSchedule{
+		workflow: w,
+		duration: duration,
+		running:  false,
+	}
+
+	sched.timer = time.AfterFunc(initialDelay, func() {
+		s.runWorkflow(sched)
+	})
+
+	s.schedules[w.ID] = sched
+}
+
+func (s *Scheduler) calculateInitialDelay(w *models.Workflow, duration time.Duration) time.Duration {
+	runs, err := s.db.ListRuns(&w.ID)
+	if err != nil || len(runs) == 0 {
+		return 0
+	}
+
+	lastRun := runs[0]
+	if lastRun.CompletedAt.IsZero() {
+		return duration
+	}
+
+	elapsed := time.Since(lastRun.CompletedAt)
+	if elapsed >= duration {
+		return 0
+	}
+
+	return duration - elapsed
+}
+
+func (s *Scheduler) runWorkflow(sched *workflowSchedule) {
+	s.mu.Lock()
+
+	if sched.running {
+		slog.Debug("Workflow already running, skipping", "component", "scheduler", "workflow", sched.workflow.Name)
+		sched.timer = time.AfterFunc(sched.duration, func() {
+			s.runWorkflow(sched)
+		})
+		s.mu.Unlock()
+		return
+	}
+
+	select {
+	case <-s.ctx.Done():
+		s.mu.Unlock()
+		return
+	default:
+	}
+
+	sched.running = true
+	runCtx, cancel := context.WithCancel(s.ctx)
+	sched.cancelRun = cancel
+	s.mu.Unlock()
+
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer func() {
+			s.mu.Lock()
+			sched.running = false
+			sched.cancelRun = nil
+
+			select {
+			case <-s.ctx.Done():
+			default:
+				sched.timer = time.AfterFunc(sched.duration, func() {
+					s.runWorkflow(sched)
+				})
+				slog.Debug("Rescheduled workflow", "component", "scheduler", "workflow", sched.workflow.Name, "next_run_in", sched.duration)
+			}
+			s.mu.Unlock()
+		}()
+
+		slog.Info("Starting scheduled workflow execution", "component", "scheduler", "workflow", sched.workflow.Name, "workflow_id", sched.workflow.ID)
+
+		run, err := s.eng.ExecuteWorkflow(runCtx, sched.workflow, "scheduler")
+		if err != nil {
+			slog.Error("Failed to execute scheduled workflow", "component", "scheduler", "workflow", sched.workflow.Name, "workflow_id", sched.workflow.ID, "error", err)
+		} else {
+			slog.Info("Completed scheduled workflow execution", "component", "scheduler", "workflow", sched.workflow.Name, "workflow_id", sched.workflow.ID, "run_id", run.ID, "status", run.Status)
+		}
+	}()
 }
 
 func (s *Scheduler) recoverRuns() {
@@ -65,7 +224,6 @@ func (s *Scheduler) recoverRuns() {
 	recoveredCount := 0
 	for _, r := range runs {
 		if r.Status == models.RunStatusRunning || r.Status == models.RunStatusPending {
-			// Mark as canceled
 			now := time.Now()
 			if err := s.db.UpdateRunStatus(r.ID, models.RunStatusCanceled, &now); err != nil {
 				slog.Error("Failed to cancel incomplete run", "component", "scheduler", "run_id", r.ID, "error", err)
@@ -79,86 +237,21 @@ func (s *Scheduler) recoverRuns() {
 	slog.Info("Recovery complete", "component", "scheduler", "runs_recovered", recoveredCount)
 }
 
-func (s *Scheduler) pollAndRun() {
-	slog.Info("Starting poll cycle", "component", "scheduler")
-
-	workflows, err := s.db.ListWorkflows()
-	if err != nil {
-		slog.Error("Failed to list workflows during poll", "component", "scheduler", "error", err)
-		return
-	}
-
-	scheduledWorkflows := 0
-	executedWorkflows := 0
-	now := time.Now()
-
-	for _, w := range workflows {
-		if w.Schedule == "" {
-			continue
-		}
-		scheduledWorkflows++
-
-		duration, err := time.ParseDuration(w.Schedule)
-		if err != nil {
-			slog.Warn("Skipping workflow with invalid schedule", "component", "scheduler", "workflow", w.Name, "schedule", w.Schedule, "error", err)
-			continue
-		}
-
-		// Get last run
-		runs, err := s.db.ListRuns(&w.ID)
-		if err != nil {
-			slog.Error("Failed to list runs for workflow", "component", "scheduler", "workflow", w.Name, "error", err)
-			continue
-		}
-
-		shouldRun := len(runs) == 0
-		if len(runs) > 0 {
-			lastRun := runs[0] // since ordered by created_at desc
-			if lastRun.CompletedAt.IsZero() {
-				// Still running, skip
-				slog.Debug("Workflow still running, skipping", "component", "scheduler", "workflow", w.Name, "last_run_id", lastRun.ID)
-				continue
-			}
-			shouldRun = lastRun.CompletedAt.Add(duration).Before(now)
-			slog.Debug("Checking workflow schedule", "component", "scheduler", "workflow", w.Name, "last_completed", lastRun.CompletedAt, "next_run", lastRun.CompletedAt.Add(duration), "should_run", shouldRun)
-		}
-
-		if shouldRun {
-			// Check if already active
-			if _, active := s.activeRuns[w.ID]; active {
-				slog.Debug("Workflow already active, skipping", "component", "scheduler", "workflow", w.Name)
-				continue
-			}
-
-			// Run
-			slog.Info("Starting scheduled workflow execution", "component", "scheduler", "workflow", w.Name, "workflow_id", w.ID)
-			runCtx, cancel := context.WithCancel(context.Background())
-			s.activeRuns[w.ID] = cancel
-
-			go func(w models.Workflow) {
-				defer delete(s.activeRuns, w.ID)
-				run, err := s.eng.ExecuteWorkflow(runCtx, &w, "scheduler")
-				if err != nil {
-					slog.Error("Failed to execute scheduled workflow", "component", "scheduler", "workflow", w.Name, "workflow_id", w.ID, "error", err)
-				} else {
-					slog.Info("Completed scheduled workflow execution", "component", "scheduler", "workflow", w.Name, "workflow_id", w.ID, "run_id", run.ID, "status", run.Status)
-				}
-			}(w)
-			executedWorkflows++
-		}
-	}
-
-	slog.Info("Poll cycle summary", "component", "scheduler", "total_workflows", len(workflows), "scheduled_workflows", scheduledWorkflows, "executed_workflows", executedWorkflows)
-}
-
 func (s *Scheduler) shutdown() {
-	activeCount := len(s.activeRuns)
-	slog.Info("Shutting down scheduler", "component", "scheduler", "active_runs", activeCount)
+	s.mu.Lock()
+	activeCount := len(s.schedules)
+	slog.Info("Shutting down scheduler", "component", "scheduler", "scheduled_workflows", activeCount)
 
-	for workflowID, cancel := range s.activeRuns {
-		slog.Info("Canceling active workflow run", "component", "scheduler", "workflow_id", workflowID)
-		cancel()
+	for _, sched := range s.schedules {
+		sched.timer.Stop()
+		if sched.cancelRun != nil {
+			slog.Info("Canceling active workflow run", "component", "scheduler", "workflow", sched.workflow.Name)
+			sched.cancelRun()
+		}
 	}
-	// Wait for goroutines to finish? But since async, just cancel.
-	slog.Info("Scheduler shutdown initiated", "component", "scheduler", "active_runs_canceled", activeCount)
+	s.mu.Unlock()
+
+	slog.Info("Waiting for active workflows to complete", "component", "scheduler")
+	s.wg.Wait()
+	slog.Info("All workflows completed", "component", "scheduler")
 }
