@@ -409,9 +409,17 @@ func (db *DB) GetStepRuns(runID int64) ([]models.StepRun, error) {
 	for rows.Next() {
 		var sr models.StepRun
 		var logsJSON string
-		err := rows.Scan(&sr.ID, &sr.RunID, &sr.StepName, &sr.Status, &sr.Attempt, &sr.StartedAt, &sr.CompletedAt, &sr.Error, &logsJSON)
+		var startedAt, completedAt sql.NullTime
+		err := rows.Scan(&sr.ID, &sr.RunID, &sr.StepName, &sr.Status, &sr.Attempt, &startedAt, &completedAt, &sr.Error, &logsJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan step run: %w", err)
+		}
+
+		if startedAt.Valid {
+			sr.StartedAt = startedAt.Time
+		}
+		if completedAt.Valid {
+			sr.CompletedAt = completedAt.Time
 		}
 
 		if err := json.Unmarshal([]byte(logsJSON), &sr.Logs); err != nil {

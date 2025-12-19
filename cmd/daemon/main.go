@@ -20,10 +20,14 @@ var (
 )
 
 func main() {
+	// Use a writer that flushes immediately for real-time log output
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
+
+	// Disable output buffering for real-time logs
+	os.Stdout.Sync()
 
 	db, err := db.NewDB(dbPath)
 	if err != nil {

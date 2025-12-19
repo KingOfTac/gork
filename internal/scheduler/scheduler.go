@@ -32,7 +32,7 @@ type Scheduler struct {
 func NewScheduler(db *db.DB) *Scheduler {
 	return &Scheduler{
 		db:        db,
-		eng:       engine.NewEngine(db),
+		eng:       engine.NewEngineWithVerboseLogs(db),
 		schedules: make(map[int64]*workflowSchedule),
 	}
 }
@@ -45,8 +45,6 @@ func (s *Scheduler) Start(ctx context.Context) {
 	s.recoverRuns()
 	s.loadWorkflows()
 
-	// Poll for workflow changes (new workflows, updated schedules, deleted workflows)
-	// This poll is just for config changes, not for triggering runs
 	// TODO: See if this can be event-driven instead of using polling
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()

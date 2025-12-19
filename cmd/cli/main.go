@@ -206,6 +206,19 @@ func main() {
 							paddedStatus = fmtc.Sprintf("{bright:green}"+statusFmt+"{reset}", status)
 						case "failed", "error":
 							paddedStatus = fmtc.Sprintf("{bright:red}"+statusFmt+"{reset}", status)
+
+							highlightRowFmt := fmtc.Sprintf("{bg:bright:red}{black}%%-%dd %%-%ds %%s %%-%ds %%-%ds %%-%ds{reset}\n",
+								idWidth-1, workflowWidth, startedWidth, completedWidth, triggerWidth)
+							paddedStatus = fmt.Sprintf(statusFmt, status)
+
+							fmtc.Printf(highlightRowFmt,
+								r.ID,
+								truncateString(workflowName, workflowWidth),
+								paddedStatus,
+								started,
+								completed,
+								r.Trigger)
+							continue
 						default:
 							paddedStatus = fmtc.Sprintf("{bright:white}"+statusFmt+"{reset}", status)
 						}

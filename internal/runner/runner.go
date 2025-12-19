@@ -33,25 +33,20 @@ func runExec(ctx context.Context, step models.WorkflowStep) ([]string, error) {
 	// Prevent steps from accessing files outside the workspace
 	cmd.Dir = "."
 
-	// Override any working directory specified in the step
 	if step.Exec.WorkingDir != "" {
 		// TODO: Log security warning but allow relative paths within current directory
 		// The validation should prevent dangerous paths, but this is an extra safeguard
 	}
 
-	// Set env with security restrictions
 	cmd.Env = []string{}
 
-	// Add safe environment variables
 	for k, v := range step.Env {
-		// Additional runtime validation
 		if !strings.Contains(k, "=") && !strings.Contains(k, ";") && !strings.Contains(k, "|") &&
 			!strings.Contains(v, "|") && !strings.Contains(v, "&") && !strings.Contains(v, ";") && !strings.Contains(v, "`") {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
 	}
 	for k, v := range step.Exec.Env {
-		// Additional runtime validation
 		if !strings.Contains(k, "=") && !strings.Contains(k, ";") && !strings.Contains(k, "|") &&
 			!strings.Contains(v, "|") && !strings.Contains(v, "&") && !strings.Contains(v, ";") && !strings.Contains(v, "`") {
 			cmd.Env = append(cmd.Env, k+"="+v)

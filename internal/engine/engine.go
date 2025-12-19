@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,12 +19,18 @@ import (
 )
 
 type Engine struct {
-	db *db.DB
-	mu sync.Mutex
+	db          *db.DB
+	mu          sync.Mutex
+	verboseLogs bool
 }
 
 func NewEngine(db *db.DB) *Engine {
-	return &Engine{db: db}
+	return &Engine{db: db, verboseLogs: false}
+}
+
+// NewEngineWithVerboseLogs creates an engine that also prints step logs to stdout
+func NewEngineWithVerboseLogs(db *db.DB) *Engine {
+	return &Engine{db: db, verboseLogs: true}
 }
 
 func (e *Engine) LoadWorkflow(filePath string) (*models.Workflow, error) {
@@ -79,35 +86,28 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow *models.Workflow,
 	}
 	run.Status = models.RunStatusRunning
 
-	// Build dependency graph
 	stepMap := make(map[string]models.WorkflowStep)
 	for _, step := range workflow.Steps {
 		stepMap[step.Name] = step
 	}
 
-	// Channels for signaling completion
 	doneChans := make(map[string]chan struct{})
 	for name := range stepMap {
 		doneChans[name] = make(chan struct{})
 	}
 
-	// Goroutines for each step
 	errCh := make(chan error, len(workflow.Steps))
 	for _, step := range workflow.Steps {
 		go e.executeStep(ctx, runID, step, stepMap, doneChans, errCh)
 	}
 
-	// Wait for all steps to complete
 	for i := 0; i < len(workflow.Steps); i++ {
 		if err := <-errCh; err != nil {
-			// On error, cancel context if not already
-			// But since goroutines may still be running, perhaps mark run as failed
 			e.db.UpdateRunStatus(runID, models.RunStatusFailed, &time.Time{})
 			return run, err
 		}
 	}
 
-	// Check if all steps succeeded
 	stepRuns, err := e.db.GetStepRuns(runID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get step runs: %w", err)
@@ -132,7 +132,6 @@ func (e *Engine) ExecuteWorkflow(ctx context.Context, workflow *models.Workflow,
 }
 
 func (e *Engine) executeStep(ctx context.Context, runID int64, step models.WorkflowStep, stepMap map[string]models.WorkflowStep, doneChans map[string]chan struct{}, errCh chan<- error) {
-	// Wait for dependencies
 	for _, dep := range step.DependsOn {
 		select {
 		case <-doneChans[dep]:
@@ -142,14 +141,12 @@ func (e *Engine) executeStep(ctx context.Context, runID int64, step models.Workf
 		}
 	}
 
-	// Resolve inputs from previous step outputs
 	resolvedStep, err := e.resolveStepInputs(runID, step)
 	if err != nil {
 		errCh <- fmt.Errorf("failed to resolve step inputs: %w", err)
 		return
 	}
 
-	// Insert step run
 	stepRun := &models.StepRun{
 		RunID:    runID,
 		StepName: step.Name,
@@ -164,13 +161,11 @@ func (e *Engine) executeStep(ctx context.Context, runID int64, step models.Workf
 	}
 	stepRun.ID = stepRunID
 
-	// Update to running
 	if err := e.db.UpdateStepRun(stepRunID, models.StepStatusRunning, nil, "", []string{}); err != nil {
 		errCh <- fmt.Errorf("failed to update step run: %w", err)
 		return
 	}
 
-	// Execute with retries
 	var lastErr error
 	for attempt := 0; attempt <= step.Retries; attempt++ {
 		stepRun.Attempt = attempt
@@ -200,6 +195,14 @@ func (e *Engine) executeStep(ctx context.Context, runID int64, step models.Workf
 		logs, err := runner.RunStep(stepCtx, resolvedStep)
 		stepRun.Logs = append(stepRun.Logs, logs...)
 
+		if e.verboseLogs && len(logs) > 0 {
+			slog.Info("Step output", "step", step.Name, "attempt", attempt+1)
+			for _, line := range logs {
+				fmt.Printf("  [%s] %s\n", step.Name, line)
+			}
+			os.Stdout.Sync()
+		}
+
 		e.mu.Lock()
 		if err := e.db.AppendLogs(stepRunID, logs); err != nil {
 			e.mu.Unlock()
@@ -209,13 +212,11 @@ func (e *Engine) executeStep(ctx context.Context, runID int64, step models.Workf
 		e.mu.Unlock()
 
 		if err == nil {
-			// Store outputs
 			if err := e.storeStepOutputs(runID, step, logs); err != nil {
 				errCh <- fmt.Errorf("failed to store step outputs: %w", err)
 				return
 			}
 
-			// Success
 			completedAt := time.Now()
 			e.mu.Lock()
 			if err := e.db.UpdateStepRun(stepRunID, models.StepStatusSuccess, &completedAt, "", stepRun.Logs); err != nil {
@@ -232,7 +233,6 @@ func (e *Engine) executeStep(ctx context.Context, runID int64, step models.Workf
 			continue
 		}
 
-		// Failed after retries
 		completedAt := time.Now()
 		status := models.StepStatusFailed
 		if stepCtx.Err() == context.DeadlineExceeded {
@@ -249,7 +249,6 @@ func (e *Engine) executeStep(ctx context.Context, runID int64, step models.Workf
 		return
 	}
 
-	// Signal completion
 	close(doneChans[step.Name])
 	errCh <- nil
 }
