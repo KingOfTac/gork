@@ -6,11 +6,13 @@ MODULE_PATH := github.com/kingoftac/gork/internal/version
 CMD_DIR := cmd
 BIN_DIR := bin
 
-BINARY := gorkctl
-DAEMON := gorkd
-TUI := gorktui
+# Binary names mapped to cmd folders
+BINS := gorkctl gorkd gorktui
 
-BINS := cli
+# Map binary names to their cmd directories
+gorkctl_DIR := cli
+gorkd_DIR := daemon
+gorktui_DIR := tui
 
 # -------------------------------------------------
 # Build metadata
@@ -54,10 +56,10 @@ $(BIN_DIR)/%$(EXT): | $(BIN_DIR)
 	$(GO) build $(GO_FLAGS) \
 		-ldflags "$(LDFLAGS)" \
 		-o $@ \
-		./$(CMD_DIR)/$*
+		./$(CMD_DIR)/$($*_DIR)
 
 run:
-	./$(BINARY) list
+	./$(BIN_DIR)/gorkctl$(EXT) list
 
 docker-build:
 	docker build -t go-workflow .
