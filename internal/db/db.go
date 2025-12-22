@@ -476,8 +476,8 @@ func (db *DB) StoreStepData(runID int64, stepName, key, value string) error {
 	if strings.TrimSpace(key) == "" {
 		return fmt.Errorf("key cannot be empty")
 	}
-	if len(value) > 10000 {
-		return fmt.Errorf("value too large (max 10000 characters)")
+	if len(value) > 1000000 {
+		return fmt.Errorf("value too large (max 1000000 characters)")
 	}
 
 	query := `INSERT OR REPLACE INTO step_data (run_id, step_name, key, value) VALUES (?, ?, ?, ?)`

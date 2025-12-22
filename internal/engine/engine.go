@@ -2,11 +2,14 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,13 +31,11 @@ func NewEngine(db *db.DB) *Engine {
 	return &Engine{db: db, verboseLogs: false}
 }
 
-// NewEngineWithVerboseLogs creates an engine that also prints step logs to stdout
 func NewEngineWithVerboseLogs(db *db.DB) *Engine {
 	return &Engine{db: db, verboseLogs: true}
 }
 
 func (e *Engine) LoadWorkflow(filePath string) (*models.Workflow, error) {
-	// Security: Validate file path to prevent directory traversal
 	cleanPath := filepath.Clean(filePath)
 	if filepath.IsAbs(cleanPath) {
 		return nil, fmt.Errorf("absolute file paths are not allowed")
@@ -43,7 +44,6 @@ func (e *Engine) LoadWorkflow(filePath string) (*models.Workflow, error) {
 		return nil, fmt.Errorf("file path cannot contain '..' (directory traversal)")
 	}
 
-	// Only allow files in workflows/ directory or current directory
 	if !strings.HasPrefix(cleanPath, "workflows/") && !strings.HasPrefix(cleanPath, "./workflows/") &&
 		!strings.HasPrefix(cleanPath, "workflows\\") && !strings.HasPrefix(cleanPath, ".\\workflows\\") &&
 		filepath.Dir(cleanPath) != "." {
@@ -253,7 +253,6 @@ func (e *Engine) executeStep(ctx context.Context, runID int64, step models.Workf
 	errCh <- nil
 }
 
-// topologicalSort is not needed since we use channels, but for validation we already have it in models
 func topologicalSort(steps map[string]models.WorkflowStep) ([]string, error) {
 	inDegree := make(map[string]int)
 	graph := make(map[string][]string)
@@ -300,15 +299,12 @@ func topologicalSort(steps map[string]models.WorkflowStep) ([]string, error) {
 func (e *Engine) resolveStepInputs(runID int64, step models.WorkflowStep) (models.WorkflowStep, error) {
 	resolvedStep := step
 
-	// Load all step data for this run
 	stepData, err := e.db.GetAllStepData(runID)
 	if err != nil {
 		return resolvedStep, fmt.Errorf("failed to get step data: %w", err)
 	}
 
-	// Resolve inputs
 	for inputKey, inputSpec := range step.Inputs {
-		// inputSpec format: "step_name.key_name"
 		parts := strings.Split(inputSpec, ".")
 		if len(parts) != 2 {
 			return resolvedStep, fmt.Errorf("invalid input spec %s: expected format step_name.key_name", inputSpec)
@@ -317,7 +313,6 @@ func (e *Engine) resolveStepInputs(runID int64, step models.WorkflowStep) (model
 
 		if stepOutputs, exists := stepData[sourceStep]; exists {
 			if value, hasKey := stepOutputs[keyName]; hasKey {
-				// Add to environment variables
 				if resolvedStep.Env == nil {
 					resolvedStep.Env = make(map[string]string)
 				}
@@ -334,18 +329,217 @@ func (e *Engine) resolveStepInputs(runID int64, step models.WorkflowStep) (model
 }
 
 func (e *Engine) storeStepOutputs(runID int64, step models.WorkflowStep, logs []string) error {
-	for outputKey, outputSpec := range step.Outputs {
-		// Simple extraction: find line containing the spec and extract everything after it
-		for _, log := range logs {
-			if idx := strings.Index(log, outputSpec); idx >= 0 {
-				value := strings.TrimSpace(log[idx+len(outputSpec):])
-				if value != "" {
-					if err := e.db.StoreStepData(runID, step.Name, outputKey, value); err != nil {
-						return fmt.Errorf("failed to store output %s: %w", outputKey, err)
-					}
+	for _, log := range logs {
+		if strings.HasPrefix(log, "HTTP_STATUS:") {
+			value := strings.TrimPrefix(log, "HTTP_STATUS:")
+			if err := e.db.StoreStepData(runID, step.Name, "status", value); err != nil {
+				return fmt.Errorf("failed to store http status: %w", err)
+			}
+		} else if strings.HasPrefix(log, "HTTP_BODY:") {
+			value := strings.TrimPrefix(log, "HTTP_BODY:")
+			if err := e.db.StoreStepData(runID, step.Name, "body", value); err != nil {
+				return fmt.Errorf("failed to store http body: %w", err)
+			}
+		} else if strings.HasPrefix(log, "HTTP_HEADER_") {
+			rest := strings.TrimPrefix(log, "HTTP_HEADER_")
+			if idx := strings.Index(rest, ":"); idx >= 0 {
+				headerName := strings.ToLower(rest[:idx])
+				headerValue := rest[idx+1:]
+				if err := e.db.StoreStepData(runID, step.Name, "header_"+headerName, headerValue); err != nil {
+					return fmt.Errorf("failed to store http header %s: %w", headerName, err)
 				}
 			}
 		}
 	}
+
+	for outputKey, outputSpec := range step.Outputs {
+		var value string
+
+		switch {
+		case strings.HasPrefix(outputSpec, "json_path:"):
+			jsonPath := strings.TrimPrefix(outputSpec, "json_path:")
+			for _, log := range logs {
+				if strings.HasPrefix(log, "HTTP_BODY:") {
+					body := strings.TrimPrefix(log, "HTTP_BODY:")
+					extracted, err := extractJSONPath(body, jsonPath)
+					if err == nil && extracted != "" {
+						value = extracted
+					}
+					break
+				}
+			}
+
+		case strings.HasPrefix(outputSpec, "regex:"):
+			pattern := strings.TrimPrefix(outputSpec, "regex:")
+			re, err := regexp.Compile(pattern)
+			if err == nil {
+				fullLog := strings.Join(logs, "\n")
+				matches := re.FindStringSubmatch(fullLog)
+				if len(matches) > 1 {
+					value = matches[1]
+				} else if len(matches) == 1 {
+					value = matches[0]
+				}
+			}
+
+		case outputSpec == "body":
+			for _, log := range logs {
+				if strings.HasPrefix(log, "HTTP_BODY:") {
+					value = strings.TrimPrefix(log, "HTTP_BODY:")
+					break
+				}
+			}
+
+		case outputSpec == "status":
+			for _, log := range logs {
+				if strings.HasPrefix(log, "HTTP_STATUS:") {
+					value = strings.TrimPrefix(log, "HTTP_STATUS:")
+					break
+				}
+			}
+
+		case outputSpec == "full_output":
+			value = strings.Join(logs, "\n")
+
+		default:
+			for _, log := range logs {
+				if idx := strings.Index(log, outputSpec); idx >= 0 {
+					value = strings.TrimSpace(log[idx+len(outputSpec):])
+					if value != "" {
+						break
+					}
+				}
+			}
+		}
+
+		if value != "" {
+			if err := e.db.StoreStepData(runID, step.Name, outputKey, value); err != nil {
+				return fmt.Errorf("failed to store output %s: %w", outputKey, err)
+			}
+		}
+	}
 	return nil
+}
+
+// extractJSONPath extracts a value from JSON using a simple path syntax
+// Supports: $.key, $.key.nested, $.array[0], $.array[*].field
+func extractJSONPath(jsonStr, path string) (string, error) {
+	if !strings.HasPrefix(path, "$.") {
+		return "", fmt.Errorf("json path must start with $.")
+	}
+
+	var data interface{}
+	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		return "", err
+	}
+
+	path = strings.TrimPrefix(path, "$.")
+	parts := splitJSONPath(path)
+
+	current := data
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+
+		if idx := strings.Index(part, "["); idx >= 0 {
+			fieldName := part[:idx]
+			indexStr := strings.TrimSuffix(strings.TrimPrefix(part[idx:], "["), "]")
+
+			if fieldName != "" {
+				if m, ok := current.(map[string]interface{}); ok {
+					current = m[fieldName]
+				} else {
+					return "", fmt.Errorf("cannot access field %s on non-object", fieldName)
+				}
+			}
+
+			arr, ok := current.([]interface{})
+			if !ok {
+				return "", fmt.Errorf("cannot index non-array")
+			}
+
+			if indexStr == "*" {
+				current = arr
+			} else {
+				i, err := strconv.Atoi(indexStr)
+				if err != nil || i < 0 || i >= len(arr) {
+					return "", fmt.Errorf("invalid array index: %s", indexStr)
+				}
+				current = arr[i]
+			}
+		} else {
+			switch v := current.(type) {
+			case map[string]interface{}:
+				current = v[part]
+			case []interface{}:
+				var results []interface{}
+				for _, item := range v {
+					if m, ok := item.(map[string]interface{}); ok {
+						if val, exists := m[part]; exists {
+							results = append(results, val)
+						}
+					}
+				}
+				current = results
+			default:
+				return "", fmt.Errorf("cannot access field %s on type %T", part, current)
+			}
+		}
+
+		if current == nil {
+			return "", fmt.Errorf("path not found")
+		}
+	}
+
+	switch v := current.(type) {
+	case string:
+		return v, nil
+	case []interface{}:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	}
+}
+
+func splitJSONPath(path string) []string {
+	var parts []string
+	var current strings.Builder
+	inBracket := false
+
+	for _, ch := range path {
+		switch ch {
+		case '.':
+			if !inBracket {
+				if current.Len() > 0 {
+					parts = append(parts, current.String())
+					current.Reset()
+				}
+			} else {
+				current.WriteRune(ch)
+			}
+		case '[':
+			inBracket = true
+			current.WriteRune(ch)
+		case ']':
+			inBracket = false
+			current.WriteRune(ch)
+		default:
+			current.WriteRune(ch)
+		}
+	}
+
+	if current.Len() > 0 {
+		parts = append(parts, current.String())
+	}
+
+	return parts
 }

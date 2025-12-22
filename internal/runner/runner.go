@@ -41,14 +41,12 @@ func runExec(ctx context.Context, step models.WorkflowStep) ([]string, error) {
 	cmd.Env = []string{}
 
 	for k, v := range step.Env {
-		if !strings.Contains(k, "=") && !strings.Contains(k, ";") && !strings.Contains(k, "|") &&
-			!strings.Contains(v, "|") && !strings.Contains(v, "&") && !strings.Contains(v, ";") && !strings.Contains(v, "`") {
+		if !strings.Contains(k, "=") {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
 	}
 	for k, v := range step.Exec.Env {
-		if !strings.Contains(k, "=") && !strings.Contains(k, ";") && !strings.Contains(k, "|") &&
-			!strings.Contains(v, "|") && !strings.Contains(v, "&") && !strings.Contains(v, ";") && !strings.Contains(v, "`") {
+		if !strings.Contains(k, "=") {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
 	}
@@ -79,13 +77,17 @@ func runHTTP(ctx context.Context, step models.WorkflowStep) ([]string, error) {
 	if method == "" {
 		method = "GET"
 	}
-	req, err := http.NewRequestWithContext(ctx, method, step.HTTP.URL, strings.NewReader(step.HTTP.Body))
+
+	url := interpolateEnvVars(step.HTTP.URL, step.Env)
+	body := interpolateEnvVars(step.HTTP.Body, step.Env)
+
+	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	for k, v := range step.HTTP.Headers {
-		req.Header.Set(k, v)
+		req.Header.Set(k, interpolateEnvVars(v, step.Env))
 	}
 
 	client := &http.Client{}
@@ -95,14 +97,19 @@ func runHTTP(ctx context.Context, step models.WorkflowStep) ([]string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	logs := []string{
-		fmt.Sprintf("HTTP %s %s -> %d", method, step.HTTP.URL, resp.StatusCode),
-		string(body),
+		fmt.Sprintf("HTTP %s %s -> %d", method, url, resp.StatusCode),
+		fmt.Sprintf("HTTP_STATUS:%d", resp.StatusCode),
+		fmt.Sprintf("HTTP_BODY:%s", string(respBody)),
+	}
+
+	for k, v := range resp.Header {
+		logs = append(logs, fmt.Sprintf("HTTP_HEADER_%s:%s", strings.ToUpper(strings.ReplaceAll(k, "-", "_")), strings.Join(v, ",")))
 	}
 
 	if resp.StatusCode >= 400 {
@@ -143,4 +150,12 @@ func runScript(ctx context.Context, step models.WorkflowStep) ([]string, error) 
 	}
 
 	return logs, nil
+}
+
+func interpolateEnvVars(s string, env map[string]string) string {
+	result := s
+	for k, v := range env {
+		result = strings.ReplaceAll(result, "${"+k+"}", v)
+	}
+	return result
 }

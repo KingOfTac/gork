@@ -308,12 +308,9 @@ func (s WorkflowStep) Validate() error {
 		return errors.New("timeout cannot be negative")
 	}
 
-	for k, v := range s.Env {
-		if strings.Contains(k, "=") || strings.Contains(k, ";") || strings.Contains(k, "|") {
-			return fmt.Errorf("environment variable key '%s' contains invalid characters", k)
-		}
-		if strings.Contains(v, "|") || strings.Contains(v, "&") || strings.Contains(v, ";") || strings.Contains(v, "`") {
-			return fmt.Errorf("environment variable '%s' contains dangerous characters", k)
+	for k := range s.Env {
+		if strings.Contains(k, "=") {
+			return fmt.Errorf("environment variable key '%s' cannot contain '='", k)
 		}
 	}
 
@@ -356,7 +353,9 @@ func (e ExecAction) Validate() error {
 		return fmt.Errorf("command '%s' is not allowed for security reasons", command)
 	}
 
-	if !AllowedCommands[strings.ToLower(command)] && !filepath.IsAbs(command) && !strings.Contains(command, "/") && !strings.Contains(command, "\\") {
+	isLocalExec := strings.HasPrefix(command, "./") || strings.HasPrefix(command, ".\\")
+	isPathBased := strings.Contains(command, "/") || strings.Contains(command, "\\")
+	if !AllowedCommands[strings.ToLower(command)] && !filepath.IsAbs(command) && !isPathBased && !isLocalExec {
 		return fmt.Errorf("command '%s' is not in the allowed commands list", command)
 	}
 
@@ -370,18 +369,9 @@ func (e ExecAction) Validate() error {
 		}
 	}
 
-	for i, arg := range e.Args {
-		if strings.Contains(arg, "|") || strings.Contains(arg, "&") || strings.Contains(arg, ";") || strings.Contains(arg, "`") {
-			return fmt.Errorf("argument %d contains dangerous shell metacharacters", i)
-		}
-	}
-
-	for k, v := range e.Env {
-		if strings.Contains(k, "=") || strings.Contains(k, ";") || strings.Contains(k, "|") {
-			return fmt.Errorf("environment variable key '%s' contains invalid characters", k)
-		}
-		if strings.Contains(v, "|") || strings.Contains(v, "&") || strings.Contains(v, ";") || strings.Contains(v, "`") {
-			return fmt.Errorf("environment variable '%s' contains dangerous characters", k)
+	for k := range e.Env {
+		if strings.Contains(k, "=") {
+			return fmt.Errorf("environment variable key '%s' cannot contain '='", k)
 		}
 	}
 
